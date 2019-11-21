@@ -5,11 +5,19 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
+
+from impyute.imputation.cs import em
 from sklearn.impute import SimpleImputer
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.svm import SVC
+
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
+from sklearn.metrics import f1_score
+from sklearn.metrics import roc_curve, auc, roc_auc_score
 
 # List of all columns to be removed from the dataset
 columns_to_drop = set()
@@ -40,13 +48,18 @@ def calculate_column_statistics(X):
 
     cols_to_remove.update(constant_columns)
 
-    print("Number of columns after performing column statistics: " + str(len(X.columns) - len(cols_to_remove)) + "\n")
+    print("\nNumber of columns after performing column statistics: " + str(len(X.columns) - len(cols_to_remove)))
 
     return cols_to_remove
 
 
 def remove_collinear_features(X):
     correlation_matrix = X.corr()
+
+    correlation_matrix_with_avg = correlation_matrix.copy()
+
+    # Add a new column with the row-wise average
+    correlation_matrix_with_avg['average'] = correlation_matrix_with_avg.mean(numeric_only=True, axis=1)
 
     sns.heatmap(correlation_matrix)
 
@@ -55,13 +68,16 @@ def remove_collinear_features(X):
     for i in range(correlation_matrix.shape[0]):
         for j in range(i + 1, correlation_matrix.shape[0]):
             # If the collinearity coefficient is too high, remove one of the features
-            if correlation_matrix.iloc[i, j] >= 0.9:
-                if columns[j]:
+            if correlation_matrix.iloc[i, j] >= 0.9 and columns[j]:
+                # Remove the feature that has a higher collinearity coefficient with all other features
+                if correlation_matrix_with_avg.iloc[j]['average'] > correlation_matrix_with_avg.iloc[i]['average']:
                     columns[j] = False
+                else:
+                    columns[i] = False
 
     selected_columns = X.columns[columns]
 
-    print("Number of columns after removing columns with high correlation: " + str(len(X.columns)) + "\n")
+    print("\nNumber of columns after removing columns with high correlation: " + str(len(X.columns)))
     return X[selected_columns], correlation_matrix
 
 
@@ -148,9 +164,11 @@ def plot_feature_importance(feature_importances):
 
     # Plot labeling
     plt.xlabel('Normalized Importance', size=16);
-    plt.title('Feature Importances', size=18)
+    plt.title('Feature Importance', size=18)
     plt.show()
 
+
+def plot_cumulative_importance(feature_importances, cumulative_importance):
     # Cumulative importance plot
     plt.figure(figsize=(6, 4))
     plt.plot(list(range(1, len(feature_importances) + 1)), feature_importances['cumulative_importance'], 'r-')
@@ -161,14 +179,54 @@ def plot_feature_importance(feature_importances):
     if cumulative_importance:
         # Index of minimum number of features needed for cumulative importance threshold
         importance_index = np.min(np.where(feature_importances['cumulative_importance'] > cumulative_importance))
+        print('\n%d features required for %0.2f of cumulative importance' % (importance_index + 1, cumulative_importance))
         plt.vlines(x=importance_index + 1, ymin=0, ymax=1, linestyles='--', colors='blue')
         plt.show()
-
-        print('%d features required for %0.2f of cumulative importance' % (importance_index + 1, cumulative_importance))
 
 
 def plot_collinearity_matrix(correlation_mat):
     sns.heatmap(correlation_mat)
+
+
+def print_prediction_metrics(y_true, y_pred):
+    print("\nPrecision is: " + str(precision_score(y_true, y_pred)))
+
+    print("\nRecall is: " + str(recall_score(y_true, y_pred)))
+
+    print("\nf1 score is: " + str(f1_score(y_true, y_pred)))
+
+
+def plot_roc_curve(y_true, y_pred):
+    print("\nROC-AUC score:")
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
+    for i in range(2):
+        fpr[i], tpr[i], _ = roc_curve(y_true, y_pred)
+        roc_auc[i] = auc(fpr[i], tpr[i])
+
+    print(roc_auc_score(y_true, y_pred))
+    plt.figure()
+    plt.plot(fpr[1], tpr[1], color='darkorange',\
+             label='ROC curve (area = %0.2f)' % roc_auc[1])
+    plt.plot([0, 1], [0, 1], color='navy', linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC')
+    plt.show()
+
+
+def plot_confusion_matrix(y_true, y_pred):
+    print("\nConfusion Matrix: ")
+    cm = confusion_matrix(y_true, y_pred)
+    print(cm)
+    sns.heatmap(cm, annot=True, fmt='d')
+    plt.ylabel("True Values")
+    plt.xlabel("Predicted Values")
+    plt.title("Confusion Matrix")
+    plt.show()
 
 
 # This is the output from the rdkit descriptor calculator tool on Galaxy
@@ -187,15 +245,19 @@ dataset = pd.read_csv(filename2, sep='\t', dtype='O')
 X = descriptors
 y = dataset['label']
 
-print("\nNumber of columns in the original dataset: " + str(len(X.columns)) + "\n")
+print("\nNumber of columns in the original dataset: " + str(len(X.columns)))
 
 # Change the datatype of the features to float and the labels to int
-X = X.astype("float32")
-y = y.astype("int32")
+X = X.astype("float")
+y = y.astype("int")
 
 # Replace inf to nan
 X = X.replace([np.inf], np.nan)
 y = y.replace([np.inf], np.nan)
+
+col_stats = calculate_column_statistics(X)
+columns_to_drop.update(col_stats)
+
 
 # Impute nan values to the mean of the respective columns using SimpleImputer
 imputer = SimpleImputer(add_indicator=False, copy=True, fill_value=None,\
@@ -213,11 +275,13 @@ imputer = IterativeImputer(add_indicator=False, estimator=None,\
 
 X = imputer.fit_transform(X)
 
+'''
+# Imputes given data using expectation maximization
+X = em(X, loops=50)
+'''
+
 # Create a pandas df again from the output of the imputer
 X = pd.DataFrame(data=X[0:, 0:])
-
-col_stats = calculate_column_statistics(X)
-columns_to_drop.update(col_stats)
 
 # Extract feature names
 feature_names = list(X.columns)
@@ -226,7 +290,7 @@ feature_names = list(X.columns)
 features = np.array(X)
 labels = np.array(y).reshape((-1,))
 
-print('Training Gradient Boosting Model\n')
+print('\nTraining Gradient Boosting Model')
 
 feature_importance_values = get_feature_importance(n_iterations, features, labels)
 
@@ -252,13 +316,16 @@ X = remove_columns(X, columns_to_drop)
 # Remove features that display high collinear coefficient
 X, corr_mat = remove_collinear_features(X)
 
-print("\nNumber of columns after feature selection: " + str(len(X.columns)) + "\n")
+print("\nNumber of columns after feature selection: " + str(len(X.columns)))
 
 # Plotting statistics
-plot_collinearity_matrix(corr_mat)
+#plot_collinearity_matrix(corr_mat)
 
 # Plot feature importance
-plot_feature_importance(feature_importances)
+#plot_feature_importance(feature_importances)
+
+# Plot cumulative importance
+#plot_cumulative_importance(feature_importances, cumulative_importance)
 
 # Separate data into train and test
 X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.8, shuffle=True)
@@ -272,11 +339,20 @@ options = {0: get_rf_classifier_model,\
            2: get_svm_classifier_model
            }
 
-classifier_type = 2
+classifier_type = 1
 
 # Fit the training data on a Gradient Boost classifier
 classifier_model = options[classifier_type]()
 
 classifier_model.fit(X_train, y_train)
 
-print("\nQuality of the model: " + str(classifier_model.score(X_test, y_test)) + "\n")
+y_pred = classifier_model.predict(X_test)
+
+print("\nAccuracy: " + str(classifier_model.score(X_test, y_test)))
+
+# Get Precision, Recall, f1 score and confusion matrix
+print_prediction_metrics(y_test, y_pred)
+
+# Plot ROC curve and confusion matrix
+plot_confusion_matrix(y_test, y_pred)
+plot_roc_curve(y_test, y_pred)
